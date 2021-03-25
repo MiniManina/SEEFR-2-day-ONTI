@@ -1,129 +1,416 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+# coding: utf8
+import rospy
+import math
+from math import sqrt
+from PIL import Image
+import csv
+from rosgraph_msgs.msg import Clock
 
-# C extensions
-*.so
+import cv2 as cv
+import numpy as np
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+from pyzbar import pyzbar
+from sensor_msgs.msg import Range
+from geometry_msgs.msg import PoseStamped
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+from clover import srv
+from std_srvs.srv import Trigger
+from clover.srv import SetLEDEffect
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+import tf2_ros
+import tf2_geometry_msgs
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+from aruco_pose.msg import MarkerArray
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
+from std_msgs.msg import String
 
-# Translations
-*.mo
-*.pot
+import threading
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+rospy.init_node('flight')
 
-# Flask stuff:
-instance/
-.webassets-cache
+get_telemetry = rospy.ServiceProxy('get_telemetry', srv.GetTelemetry)
+navigate = rospy.ServiceProxy('navigate', srv.Navigate)
+land = rospy.ServiceProxy('land', Trigger)
+set_effect = rospy.ServiceProxy('led/set_effect', SetLEDEffect)
+set_position = rospy.ServiceProxy('set_position', srv.SetPosition)
 
-# Scrapy stuff:
-.scrapy
+bridge = CvBridge()
 
-# Sphinx documentation
-docs/_build/
+tf_buffer = tf2_ros.Buffer()
+tf_listener = tf2_ros.TransformListener(tf_buffer)
 
-# PyBuilder
-target/
+rospy.init_node('flight')
 
-# Jupyter Notebook
-.ipynb_checkpoints
+get_telemetry = rospy.ServiceProxy('get_telemetry', srv.GetTelemetry)
+navigate = rospy.ServiceProxy('navigate', srv.Navigate)
+land = rospy.ServiceProxy('land', Trigger)
+set_effect = rospy.ServiceProxy('led/set_effect', SetLEDEffect)
 
-# IPython
-profile_default/
-ipython_config.py
+bridge = CvBridge()
 
-# pyenv
-.python-version
+tf_buffer = tf2_ros.Buffer()
+tf_listener = tf2_ros.TransformListener(tf_buffer)
 
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
 
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow
-__pypackages__/
+# Number or not
+def number(x):
+    flag_num = True
+    try:
+        num = int(x)
+    except ValueError:
+        flag_num = False
+    return flag_num
 
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
+def navigate_wait(x=0, y=0, z=0, yaw=float('nan'), speed=0.5, frame_id='', auto_arm=False, tolerance=0.2):
+    navigate(x=x, y=y, z=z, yaw=yaw, speed=speed, frame_id=frame_id, auto_arm=auto_arm)
+    while not rospy.is_shutdown():
+        telem = get_telemetry(frame_id='navigate_target')
+        if math.sqrt(telem.x ** 2 + telem.y ** 2 + telem.z ** 2) < tolerance:
+            break
+        rospy.sleep(0.2)
 
-# SageMath parsed files
-*.sage.py
+def parsing_the_text(coord):
+    value = list(coord)
+    value_7 = list(coord)
+    z = 0
 
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+    for i in value:
+        if not number(i) and (i != '.'):
+            value_7.remove(i)
+    coord = ''
+    for i in range(len(value_7)):
+        coord += value_7[i]
+    return coord
+'''
+def parsing_the_text(coord):
+    tempstr = coord
+    global coordsfromqr
+    coordsfromqr = []
+    z = 0
+    cel = 0
+    drob = 0
+    i = 0
+    while z<len(tempstr):
+        if z!=len(tempstr)-1:
+            print(i)
+            cel = int(tempstr[z])
+            des = float(tempstr[z+2])/10
+            coordsfromqr.append(cel+des)
+            coordsfromqr.append(999)
+            z+=4
+        else:
+            cel = int(tempstr[z])
+            coordsfromqr.append(cel)
+            break
+'''
 
-# Spyder project settings
-.spyderproject
-.spyproject
 
-# Rope project settings
-.ropeproject
 
-# mkdocs documentation
-/site
+       
+# Reading QR codes
+def image_callback():
+    data = rospy.wait_for_message('main_camera/image_raw', Image)
+    cv_image = bridge.imgmsg_to_cv2(data, 'bgr8')
+    cv_image = cv_image[80:160, 100:220]
+    barcodes = pyzbar.decode(cv_image)
+    # Checking the QR code readout
+    if len(barcodes) == 0:
+        flag_readable = False
+    else:
+        flag_readable = True
+    # Getting the coordinates of the following QR code
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
+    for barcode in barcodes:
+        global coordinates
 
-# Pyre type checker
-.pyre/
+        (x, y, w, h) = barcodes[0].rect
+        cv.rectangle(cv_image, (x, y), (x + w, y + h), (255, 105, 180), 3)
+        debug_qr.publish(bridge.cv2_to_imgmsg(cv_image, 'bgr8'))
+        coordinates = barcode.data.encode("utf-8")
+    return flag_readable
+
+
+# Checking readability
+def check_readability(z):
+    flag_result = False
+    for i in range(5):
+        navigate_wait(x=0.4, y=0.8, z=z, speed=1, frame_id='aruco_map')
+        rospy.sleep(3)
+        for _ in range(5):
+            flag_readable = image_callback()
+            rospy.sleep(0.3)
+            if flag_readable == True:
+                flag_result = True
+                break
+        if flag_readable == True:
+            print('Text:')
+            break
+        z -= 0.1
+    return flag_result
+
+def color_detect(cv_image):
+    color = {'green': [40, 100, 100, 80, 255, 255, [0, 255, 0]], 'red_1': [170, 100, 100, 179, 255, 255, [0, 0, 255]], 'red_2': [0, 100, 100, 10, 255, 255, [0, 0, 255]], 'yellow': [20, 100, 100, 40, 255, 255, [0, 255, 255]], 'blue': [110, 100, 100, 130, 255, 255, [255, 0, 0]]}
+    colors_name = ['green', 'red_1', 'red_2', 'yellow', 'blue']
+    
+    ret = []
+
+    for name in colors_name:
+        hsv_param = color[name]
+        hsv_min = np.array((hsv_param[0], hsv_param[1], hsv_param[2]), np.uint8)
+        hsv_max = np.array((hsv_param[3], hsv_param[4], hsv_param[5]), np.uint8)
+
+        hsv = cv.cvtColor(cv_image, cv.COLOR_BGR2HSV)
+        thresh = cv.inRange(hsv, hsv_min, hsv_max)
+        new_image, contours0, hierarchy = cv.findContours(thresh.copy(), cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+        
+        for cnt in contours0:
+            rect = cv.minAreaRect(cnt)
+            box = cv.boxPoints(rect)
+            box = np.int0(box)
+
+            thresh_new = cv.GaussianBlur(thresh, (5, 5), 2)
+            rows = thresh_new.shape[0]
+            circles = []
+            circles = cv.HoughCircles(thresh_new, cv.HOUGH_GRADIENT, 1, rows / 8,
+                                    param1=100, param2=30,
+                                    minRadius=1, maxRadius=50)
+
+            if circles is not None:
+                circles = np.uint16(np.around(circles))
+                for i in circles[0, :]:
+                    center = [i[0], i[1]]
+                    ret.append([center, 'circle', name])
+
+            if sqrt((box[0][0] - box[2][0])**2 + (box[0][1] - box[2][1])**2) > 20:
+                
+                min_x = box[:, 0].min()
+                max_x = box[:, 0].max()
+                min_y = box[:, 1].min()
+                max_y = box[:, 1].max()
+
+                new_min_y = min_y-20 if min_y-20 >= 0 else 0
+                new_max_y = max_y+20 if max_y+20 >= 0 else 0
+                new_min_x = min_x-20 if min_x-20 >= 0 else 0
+                new_max_x = max_x+20 if max_x+20 >= 0 else 0
+
+                thresh_new = thresh[new_min_y:new_max_y, new_min_x:new_max_x]
+
+                moments = cv.moments(thresh_new, 1)
+                dM01 = moments['m01']
+                dM10 = moments['m10']
+                dArea = moments['m00']
+
+                x = int(dM10 / dArea) + new_min_x
+                y = int(dM01 / dArea) + new_min_y
+
+                k = 0
+                try:
+                    for i in circles[0, :]:
+                        if  abs(i[0] - x) < 10 and abs(i[1] - y) < 10:
+                            k += 1
+                except TypeError:
+                    k == 0
+
+                if k == 0:
+                    ret.append([[x, y], 'rectangle', name])
+
+    return ret
+
+#draw contours
+def contour(cv_image):
+    color = {'green': [120, 78, 62, 157, 78, 90, [0, 255, 0]]}
+    colors_name = ['green']
+
+    for name in colors_name:
+        hsv_param = color[name]
+        hsv_min = np.array((hsv_param[0], hsv_param[1], hsv_param[2]), np.uint8)
+        hsv_max = np.array((hsv_param[3], hsv_param[4], hsv_param[5]), np.uint8)
+
+
+        hsv = cv.cvtColor(cv_image, cv.COLOR_BGR2HSV)
+        thresh = cv.inRange(hsv, hsv_min, hsv_max)
+        new_image, contours0, hierarchy = cv.findContours(thresh.copy(), cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+        
+        for cnt in contours0:
+            rect = cv.minAreaRect(cnt)
+            box = cv.boxPoints(rect)
+            box = np.int0(box)
+
+            thresh_new = cv.GaussianBlur(thresh, (5, 5), 2)
+            rows = thresh_new.shape[0]
+            circles = cv.HoughCircles(thresh_new, cv.HOUGH_GRADIENT, 1, rows / 8,
+                                    param1=100, param2=30,
+                                    minRadius=1, maxRadius=50)
+
+            if circles is not None:
+                circles = np.uint16(np.around(circles))
+                for i in circles[0, :]:
+                    x_center_circle = i[0]
+                    y_center_circle = i[1]
+                    radius = i[2]
+            else:
+                x_center_circle = -1
+                y_center_circle = -1
+                radius = -1
+
+            if sqrt((box[0][0] - box[2][0])**2 + (box[0][1] - box[2][1])**2) > 20:
+                
+                min_x = box[:, 0].min()
+                max_x = box[:, 0].max()
+                min_y = box[:, 1].min()
+                max_y = box[:, 1].max()
+
+                new_min_y = min_y-20 if min_y-20 >= 0 else 0
+                new_max_y = max_y+20 if max_y+20 >= 0 else 0
+                new_min_x = min_x-20 if min_x-20 >= 0 else 0
+                new_max_x = max_x+20 if max_x+20 >= 0 else 0
+
+                thresh_new = thresh[new_min_y:new_max_y, new_min_x:new_max_x]
+
+                moments = cv.moments(thresh_new, 1)
+                dM01 = moments['m01']
+                dM10 = moments['m10']
+                dArea = moments['m00']
+
+                x = int(dM10 / dArea) + new_min_x
+                y = int(dM01 / dArea) + new_min_y
+
+                if x_center_circle != -1 and y_center_circle != -1 and abs(x_center_circle - x) >= 10 and abs(y_center_circle - y) >= 10:
+                    cv.drawContours(cv_image, [box], 0, (hsv_param[6][0], hsv_param[6][1], hsv_param[6][2]), 2)
+                if x_center_circle != -1 and y_center_circle != -1 and radius != -1:
+                    cv.circle(cv_image, (x_center_circle, y_center_circle), radius, (hsv_param[6][0], hsv_param[6][1], hsv_param[6][2]), 2)
+
+                cv.circle(cv_image, (x, y), 5, (0, 0, 0), -1)
+                cv.rectangle(cv_image, (x, y - 18), (x + 50, y), (255, 255, 255), -1)
+                cv.rectangle(cv_image, (x, y - 18), (x + 50, y), (0, 0, 0), 1)
+                if name == 'red_1' or name == 'red_2':
+                    name_color = 'red'
+                else:
+                    name_color = name
+                cv.putText(cv_image, name_color, (x + 3, y - 5), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+
+    image_pub.publish(bridge.cv2_to_imgmsg(cv_image, 'bgr8'))
+
+
+def image_callback_cm(data):
+    cv_image = bridge.imgmsg_to_cv2(data, 'bgr8')
+
+
+z = 1
+X,Y = 0,0 #coordinates strelki
+
+print('Start writing')
+f = open('1.txt', 'w')
+telem = get_telemetry('aruco_map')
+
+debug_qr = rospy.Publisher('debug_qr', Image, queue_size=10)
+image_sub = rospy.Subscriber('main_camera/image_raw', Image,image_callback_cm)
+image_pub = rospy.Publisher('~start', Image, queue_size=10)
+img_pub = rospy.Publisher('~check', Image, queue_size= 10)
+
+navigate_wait(x=0, y=0, z=1, speed=1., frame_id='body', auto_arm=True)
+navigate_wait(x=0, y=0, z=1, speed=1, frame_id='aruco_map')
+
+print('Writing telemetry of copter')
+
+flag = check_readability(z)
+print(coordinates)
+coordinates = list(coordinates.split(' '))
+print('Column area ', 'x =', coordinates[0],'y',coordinates[1] )
+print('Navigate area', 'x=', coordinates[3][5:8], 'y=', coordinates[len(coordinates)-1][:3])
+print('Order:', coordinates[len(coordinates)-1][5])
+if X != 0 and Y != 0:
+    print('OK')
+n = ''   
+navigate_wait(x=float(coordinates[3][5:8]),y=float(coordinates[len(coordinates)-1][:3]),z = 1.5, speed = 1, frame_id = 'aruco_map')
+rospy.sleep(5)
+while True:
+    cv_image = bridge.imgmsg_to_cv2(rospy.wait_for_message('main_camera/image_raw', Image), 'bgr8')[80:160, 100:230]
+    hsv = cv.cvtColor(cv_image, cv.COLOR_BGR2HSV)
+    (_ret, threshold) = cv.threshold(hsv[:,:,1], 90, 255, cv.THRESH_OTSU)
+    dist = cv.distanceTransform(threshold, cv.DIST_L2, cv.DIST_MASK_PRECISE)
+    idx=np.argmax(dist)
+    y,x=np.unravel_index(idx, dist.shape) #corner position
+    color=cv_image[y,x,:]
+    M = cv.moments(threshold)
+    cX = int(M["m10"] / M["m00"])
+    cY = int(M["m01"] / M["m00"])
+
+    naprav = 180*np.arctan2(cX-x, cY-y)/np.pi
+    shir = 2.5
+    dlina = 3.4
+    if naprav > -10 and naprav < 10:
+        print("Sector B")
+        navigate_wait(x=0,y=0,z=0,speed=0.5,frame_id='body')
+        telem = get_telemetry('aruco_map')
+        navigate(x=0,y=-telem.y,z=0,speed=0.1,frame_id='body')
+        n ='b'
+        break
+    if naprav > 80 and naprav < 100:
+        print('Sector C')
+        navigate_wait(x=0,y=0,z=0,speed=0.5,frame_id='body')
+        telem = get_telemetry('aruco_map')
+        navigate(x=dlina-telem.x,y=0,z=0,speed=0.1,frame_id='body')
+        n='c'
+        break
+    if naprav >=-180 and naprav < -165 or naprav > 165 and naprav <= 180:
+        print('Sector A')
+        navigate_wait(x=0,y=0,z=0,speed=0.5,frame_id='body')
+        telem = get_telemetry('aruco_map')
+        navigate(x=0,y=shir-telem.y,z=0,speed=0.1,frame_id='body')
+        n='a'
+        break
+    if naprav > -100 and naprav < -70:
+        print('Sector D')
+        navigate_wait(x=0,y=0,z=0,speed=0.5,frame_id='body')
+        telem = get_telemetry('aruco_map')
+        navigate(x=-telem.x,y=0,z=0,speed=0.1,frame_id='body')
+        n='d'
+        break
+    #hsv_min = np.array((0,0,0), np.uint8)
+    #hsv_max = np.array((50, 50, 50), np.uint8)
+    #hsv = cv.cvtColor(cv_image, cv.COLOR_BGR2HSV)
+    #mask=cv.inRange(hsv, hsv_min, hsv_max)
+    #mask=cv.erode(mask, None, iterations=2)
+    #mask=cv.dilate(mask, None, iterations=4)
+    #contours = cv.findContours(mask, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+    #contours=contours[1]
+    #cv.drawContours(cv_image, contours, -1, (255, 0, 255), 3)
+    img_pub.publish(bridge.cv2_to_imgmsg(cv_image, 'bgr8'))
+    rospy.sleep(1)
+cap = True
+while cap:
+    data = rospy.wait_for_message('rangefinder/range', Range)
+    dalno = float (data.range)
+    print(dalno)
+    if dalno>1.7:
+        telem = get_telemetry('aruco_map')
+        i=0
+        high=int((telem.z-0.8)/0.1)
+        while i<high:
+            set_position(x=0, y=0, z=-0.1, frame_id='body')
+            i+=1
+            rospy.sleep(0.4)
+        land()
+        
+        if n=='a':
+            print("Delivered in Sector A")
+        elif n=='b':
+            print("Delivered in Sector B")
+        elif n=='c':
+            print("Delivered in Sector C")
+        elif n=='d':
+            print("Delivered in Sector D")
+        rospy.sleep(5)
+        cap = False
+        
+navigate(x=0, y=0, z=0.5, speed=1, frame_id='body', auto_arm=True)
+rospy.sleep(2)
+navigate_wait(x=0,y=0,z=0.5,speed=0.5,frame_id='aruco_map')
+rospy.sleep(2)
+land()
+print("LAND")
+print(coordinates[len(coordinates)-1][5], 'Delivered in', n)
+f.close()
+land()
